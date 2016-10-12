@@ -1,9 +1,0 @@
-{application,hwpush,
-             [{description,"huawei push API by Erlang"},
-              {vsn,"1.0.0"},
-              {registered,[]},
-              {applications,[kernel,stdlib,jsx,ssl,crypto]},
-              {mod,{hwpush_app,[]}},
-              {modules,[hwpush,hwpush_app,hwpush_connection,hwpush_example,
-                        hwpush_sup]},
-              {env,[]}]}.
