@@ -110,26 +110,23 @@ get_access_token(AppId, AppSecret) ->
 %% @hidden
 -spec handle_call(X, reference(), hwpush:connection()) ->
   {stop, {unknown_request, X}, {unknown_request, X}, hwpush:connection()}.
-handle_call(Msg, From, State = #{socket := undefined, expires := Expires, timeout := Timeout,
+handle_call(PushMsg, From, State = #{socket := undefined, expires := Expires, timeout := Timeout,
   host := Host, port := Port, ssl_opts := SSLOpts}) ->
   try
     {ok, Socket} = ssl:connect(Host, Port, ssl_opts(SSLOpts), Timeout),
-    handle_call(Msg, From, State#{socket => Socket, expires_conn => epoch(Expires)})
+    handle_call(PushMsg, From, State#{socket => Socket, expires_conn => epoch(Expires)})
   catch
     _: ErrReason -> {stop, ErrReason}
   end;
 
-handle_call({Method, MsgType, Query} = Req, From, State = #{socket := Socket, host := Host,
-  android_auth_key := AndroidAuth, ios_auth_key := IOSAuth,
-  android_reg_package_name := AndroidPackageName, ios_bundle_id := IOSBundleId,
-  expires := Expires, expires_conn := ExpiresConn}) ->
+handle_call(PushMsg, From, State = #{socket := Socket, host := Host,
+  expires := Expires, expires_conn := ExpiresConn, access_token := AccessToken}) ->
   case ExpiresConn =< epoch(0) of
     true ->
       ssl:close(Socket),
-      handle_call(Req, From, State#{socket => undefined});
+      handle_call(PushMsg, From, State#{socket => undefined});
     false ->
-      {Auth, NewQuery} = get_auth_and_query(MsgType, AndroidAuth, IOSAuth, AndroidPackageName, IOSBundleId, Query),
-      case do_send_recv_data(Socket, Method, NewQuery, Host, Auth) of
+      case do_send_recv_data(Socket, PushMsg, AccessToken) of
         {reply, Data} ->
           NewData = re:replace(Data, <<"\r\n\.+\r\n">>, <<"">>, [global, {return, binary}]),
           DataList = binary:split(NewData, [<<",">>], [global]),
@@ -141,43 +138,27 @@ handle_call(Request, _From, State) ->
   {stop, {unknown_request, Request}, {unknown_request, Request}, State}.
 
 %% @hidden
--spec handle_cast(stop | hwpush:msg(), hwpush:connection()) ->
+-spec handle_cast(stop | hwpush:push_msg(), hwpush:connection()) ->
   {noreply, hwpush:connection()} | {stop, normal | {error, term()}, hwpush:connection()}.
-handle_cast(Msg, State = #{socket := undefined, expires := Expires, timeout := Timeout,
+handle_cast(PushMsg, State = #{socket := undefined, expires := Expires, timeout := Timeout,
   host := Host, port := Port, ssl_opts := SSLOpts}) ->
   try
     {ok, Socket} = ssl:connect(Host, Port, ssl_opts(SSLOpts), Timeout),
-    handle_cast(Msg, State#{socket => Socket, expires_conn => epoch(Expires)})
+    handle_cast(PushMsg, State#{socket => Socket, expires_conn => epoch(Expires)})
   catch
     _: ErrReason -> {stop, ErrReason}
   end;
 handle_cast(stop, State) -> {stop, normal, State};
-handle_cast({Token, PushMsg}, State = #{socket := Socket, host := Host,
+handle_cast(PushMsg, State = #{socket := Socket, host := Host,
   expires := Expires, expires_conn := ExpiresConn, access_token := AccessToken})  ->
   case ExpiresConn =< epoch(0) of
     true ->
       ssl:close(Socket),
-      handle_cast({Token, PushMsg}, State#{socket => undefined});
+      handle_cast(PushMsg, State#{socket => undefined});
     false ->
-	  Payload = case maps:get(pass_through, PushMsg, undefined) of
-	        1 ->
-				build_request("", maps:merge(?SINGLE_ARGS#{<<"access_token">> => AccessToken, <<"deviceToken">> => Token}, maps:remove(pass_through, PushMsg)));
-	        0 ->
-	            #{title := Title, description := Content} = PushMsg,
-	            AndroidMsg = jiffy:encode(#{<<"notification_title">> => Title, <<"notification_content">> => Content, <<"doings">> => 1}),
-	            build_request("", maps:merge(?NOTIFICATION_ARGS#{<<"access_token">> => AccessToken, tokens => Token, <<"android">> => AndroidMsg}, maps:without([pass_through, title, description], PushMsg)))
-	  end,
-
-	  ContentLen = integer_to_list(size(list_to_binary(Payload))),
-      Msg = ["POST /rest.php HTTP/1.1", "\r\n",
-	    	[["Host", ": ", "api.vmall.com", "\r\n"],
-	      	["Content-Type", ": ", "application/x-www-form-urlencoded; charset=utf-8", "\r\n"],
-			 ["content-length", ": ", ContentLen, "\r\n"]],
-    		"\r\n",
-		    Payload
-		  ],
-	  io:format("\r\n send: ~s \r\n", [Msg]),
-      case ssl:send(Socket, Msg) of
+		Payload = get_payload(PushMsg, AccessToken),
+	   io:format("\r\n send: ~s \r\n", [Payload]),
+      case ssl:send(Socket, Payload) of
         ok ->
           {noreply, State#{expires_conn => epoch(Expires)}};
         {error, Reason} -> {stop, {error, Reason}, State}
@@ -249,10 +230,16 @@ build_request(Path, QueryParameters) ->
 %% INTERNAL FUNCTION
 %% ===================================================================
 
-get_auth_and_query(ios, _AndroidAuth, IOSAuth, _AndroidPackageName, IOSBundleId, Query) ->
-  {IOSAuth, Query ++ "&restricted_package_name=" ++ IOSBundleId};
-get_auth_and_query(android, AndroidAuth, _IOSAuth, AndroidPackageName, _IOSBundleId, Query) ->
-  {AndroidAuth, Query ++ "&restricted_package_name=" ++ AndroidPackageName}.
+get_payload(PushMsg, AccessToken) ->
+	   Payload = build_request("", maps:merge(?SINGLE_ARGS#{<<"access_token">> => AccessToken}, PushMsg)),
+	   ContentLen = integer_to_list(size(list_to_binary(Payload))),
+      ["POST /rest.php HTTP/1.1", "\r\n",
+	    	[["Host", ": ", "api.vmall.com", "\r\n"],
+	      	["Content-Type", ": ", "application/x-www-form-urlencoded; charset=utf-8", "\r\n"],
+			 ["content-length", ": ", ContentLen, "\r\n"]],
+    		"\r\n",
+		    Payload
+		  ].
 
 joint_req(Method, Query, Auth, Host) ->
   [Method, " ", Query, " ", "HTTP/1.1", "\r\n",
@@ -261,8 +248,8 @@ joint_req(Method, Query, Auth, Host) ->
       ["Content-Length", ": ", "0", "\r\n"]],
     "\r\n"].
 
-do_send_recv_data(Socket, Method, Query, Host, Auth) ->
-  Msg = joint_req(Method, Query, Auth, Host),
+do_send_recv_data(Socket, PushMsg, AccessToken) ->
+  Msg = get_payload(PushMsg, AccessToken),
   ssl:setopts(Socket, [{active, false}]),
   case ssl:send(Socket, Msg) of
     ok ->
