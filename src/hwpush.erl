@@ -1,7 +1,6 @@
 %%%-------------------------------------------------------------------
 %%%-------------------------------------------------------------------
 -module(hwpush).
--author('zhongwencool@gmail.com').
 
 -include("hwpush.hrl").
 
@@ -15,34 +14,7 @@
 
 %% 推送单条消息
 -export([push_to_regid/4]).
--export([push_to_alias/4]).
--export([push_to_account/4]).
--export([push_to_topic/4]).
--export([push_to_multi_topic/5]).
--export([push_to_all/3]).
 
-%%推送多条消息
--export([multi_msg_to_regids/5]).
--export([multi_msg_to_alias/5]).
--export([multi_msg_to_account/5]).
-
-%%消息的状态数据
--export([get_msg_count_info/5]).
--export([get_msg_status/4]).
--export([get_msgs_status/4]).
--export([get_invalid_regids/2]).
-
-%%订阅topic alias
--export([subscribe_topic/6]).
--export([unsubscribe_topic/5]).
--export([get_all_topic/4]).
--export([unsubscribe_alias/6]).
--export([subscribe_alias/6]).
--export([get_all_alias/4]).
-
-%% Job 操作
--export([check_schedule_job_exist/3]).
--export([del_schedule_job/3]).
 
 %% Util
 -export([milliseconds_utc_since_1970/1]).
@@ -185,219 +157,10 @@ disconnect(ConnId) -> hwpush_connection:stop(ConnId).
 %% ===================================================================
 
 %% @doc 向某个regid或一组regid列表推送某条消息
--spec push_to_regid(pid(), [registration_id(), ...], push_msg(), return|no_return)-> ok|result().
-push_to_regid(ConnID, RegIDs = [_|_], PushMsg, ReturnType) ->
-  NewPushMsg = maps:remove(type, PushMsg),
-  MsgType = maps:get(type, PushMsg),
-  Query = NewPushMsg#{registration_id => join(RegIDs, ", ")},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?REGID_PUSH_URL, Query)},
+-spec push_to_regid(pid(), list(), push_msg(), return|no_return)-> ok|result().
+push_to_regid(ConnID, Token, PushMsg, ReturnType) ->
+  Req = {Token, PushMsg},
   Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 向某个alias或一组alias列表推送某条消息
--spec push_to_alias(pid(), [alias(), ...], push_msg(), return|no_return) -> ok|result().
-push_to_alias(ConnID, Alias = [_|_], PushMsg, ReturnType) ->
-  NewPushMsg = maps:remove(type, PushMsg),
-  MsgType = maps:get(type, PushMsg),
-  Query = NewPushMsg#{alias => join(Alias, ", ")},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?ALIAS_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 向某个account或一组account列表推送某条消息 restapi没有提供设置account的接口，所以只能通过客户端做
--spec push_to_account(pid(), [account(), ...], push_msg(), return|no_return) -> ok|result().
-push_to_account(ConnID, Accounts = [_|_], PushMsg, ReturnType) ->
-  NewPushMsg = maps:remove(type, PushMsg),
-  MsgType = maps:get(type, PushMsg),
-  Query = NewPushMsg#{user_account => join(Accounts, ", ")},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?ACCOUNTS_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 向某个topic推送某条消息
--spec push_to_topic(pid(), nonempty_string(), push_msg(), return|no_return) -> ok|result().
-push_to_topic(ConnID, Topic, PushMsg, ReturnType) ->
-  NewPushMsg = maps:remove(type, PushMsg),
-  MsgType = maps:get(type, PushMsg),
-  Query = NewPushMsg#{topic => Topic},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?TOPIC_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 向所有设备推送某条消息
--spec push_to_all(pid(), push_msg(), return|no_return) -> ok|result().
-push_to_all(ConnID, PushMsg, ReturnType) ->
-  NewPushMsg = maps:remove(type, PushMsg),
-  MsgType = maps:get(type, PushMsg),
-  Req = {"POST", MsgType, hwpush_connection:build_request(?ALL_PUSH_URL, NewPushMsg)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 向多个topic推送单条消息
--spec push_to_multi_topic(pid(), [string(), ...], string(), push_msg(), return|no_return) -> ok|{error, any()}.
-push_to_multi_topic(ConnID, Topics, OP, PushMsg, ReturnType)->
-  case check_topic(Topics, OP) of
-    ok ->
-      NewPushMsg = maps:remove(type, PushMsg),
-      MsgType = maps:get(type, PushMsg),
-      Query = NewPushMsg#{topics => join(Topics, ":$")},
-      Req = {"POST", MsgType, hwpush_connection:build_request(?MULTI_TOPIC_PUSH_URL, Query)},
-      Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-      simplify_to_result(Result);
-    {error, Reason} -> {error, Reason}
-  end.
-
-%% ===================================================================
-%%推送多条消息
-%% ===================================================================
-
-%% @doc 针对不同的regid推送不同的消息
--spec multi_msg_to_regids(pid(), ios|android, [{registration_id(), push_msg()}, ...], non_neg_integer(), return|no_return) -> ok|result().
-multi_msg_to_regids(ConnID, MsgType, Msgs, TimeToSend, ReturnType)when is_integer(TimeToSend) ->
-  Query =
-    case TimeToSend == 0 of
-      true -> #{messages => jsx:encode(transform_extra(Msgs))};
-      false -> #{messages => jsx:encode(transform_extra(Msgs)), time_to_send => TimeToSend}
-    end,
-  Req = {"POST", MsgType, hwpush_connection:build_request(?REGIDS_MSGS_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 针对不同的alias推送不同的消息
--spec multi_msg_to_alias(pid(), ios|android, [{alias(), push_msg()}, ...], non_neg_integer(), return|no_return) -> ok|result().
-multi_msg_to_alias(ConnID, MsgType, Msgs, TimeToSend, ReturnType) when is_integer(TimeToSend) ->
-  Query =
-    case TimeToSend == 0 of
-      true -> #{messages => jsx:encode(transform_extra(Msgs))};
-      false -> #{messages => jsx:encode(transform_extra(Msgs)), time_to_send => TimeToSend}
-    end,
-  Req = {"POST", MsgType, hwpush_connection:build_request(?ALIAS_MSGS_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 针对不同的userAccount推送不同的消息
--spec multi_msg_to_account(pid(), ios|android, [{account(), push_msg()}, ...], non_neg_integer(), return|no_return) -> ok|result().
-multi_msg_to_account(ConnID, MsgType, Msgs, TimeToSend, ReturnType)when is_integer(TimeToSend) ->
-  Query =
-    case TimeToSend == 0 of
-      true -> #{message => jsx:encode(transform_extra(Msgs))};
-      false -> #{message => jsx:encode(transform_extra(Msgs)), time_to_send => TimeToSend}
-    end,
-  Req = {"POST", MsgType, hwpush_connection:build_request(?ACCOUNT_MSGS_PUSH_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% ===================================================================
-%%消息的状态数据
-%% ===================================================================
-%% @doc 获取消息的统计数据
--spec get_msg_count_info(pid(), ios|android, date(), date(), string()) -> result().
-get_msg_count_info(ConnID, MsgType, StartDate, EndDate, APPName) ->
-  Query = #{start_date => format_date(StartDate), end_date => format_date(EndDate),
-    restricted_package_name => APPName},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?MSG_COUNTER_URL, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
-%% @doc 追踪消息的状态
--spec get_msg_status(pid(), ios|android, 'msg_id'|'job_key', string()) -> result().
-get_msg_status(ConnID, MsgType, Type, Value) ->
-  Query = maps:put(Type, Value, #{}),
-  Req = {"GET", MsgType, hwpush_connection:build_request(?MSG_STATUS, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
--spec get_msgs_status(pid(), ios|android, non_neg_integer(), non_neg_integer()) -> result().
-get_msgs_status(ConnID, MsgType, BeginTime, EndTime) ->
-  Query = #{begin_time => BeginTime, end_time => EndTime},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?MSGS_STATUS, Query)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
-%% @doc 获取失效的regId列表
-%%获取失效的regId列表，每次请求最多返回1000个regId。
-%%每次请求之后，成功返回的失效的regId将会从MiPush数据库删除。
--spec get_invalid_regids(pid(), ios|android) -> list().
-get_invalid_regids(ConnID, MsgType) ->
-  Req = {"GET", MsgType, hwpush_connection:build_request(?INVALID_REGIDS_URL, [])},
-  hwpush_connection:send_message(ConnID, Req, return).
-
-%% ===================================================================
-%%订阅 topic/alias
-%% ===================================================================
-
-%% @doc 订阅RegId的标签
--spec subscribe_topic(pid(), ios|android, registration_id(), string(),
-    'undefined'|string(), return|no_return) -> ok|result().
-subscribe_topic(ConnID, MsgType, RegisterID, Topic, Category, ReturnType) ->
-  Querys =
-    case Category of
-      undefined -> #{registration_id => RegisterID, topic => Topic};
-      _ -> #{registration_id => RegisterID, topic => Topic, category => Category}
-    end,
-  Req = {"POST", MsgType, hwpush_connection:build_request(?SUB_TOPIC_URL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 取消订阅RegId的标签,
--spec unsubscribe_topic(pid(), ios|android, registration_id(), string(), return|no_return) -> ok|result().
-unsubscribe_topic(ConnID, MsgType, RegisterID, Topic, ReturnType) ->
-  Querys = #{registration_id => RegisterID, topic => Topic},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?UNSUB_TOPIC_URL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc 获取一个应用的某个用户目前订阅的所有Topic
--spec get_all_topic(pid(), ios|android, registration_id(), string()) -> ok|result().
-get_all_topic(ConnID, MsgType, RegisterID, APPName) ->
-  Querys = #{registration_id => RegisterID, regestricted_package_name => APPName},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?TOPIC_ALL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
-%% @doc  订阅Regid的Aliases restapi没有提供设置alias的接口，所以只能通过客户端做
--spec subscribe_alias(pid(), ios|android, registration_id(), string(), [alias()], return|no_return) -> ok|result().
-subscribe_alias(ConnID, MsgType, RegisterID, Topic, Aliases, ReturnType) ->
-  Querys = #{registration_id => RegisterID, topic => Topic, aliases => Aliases},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?SUB_ALIAS_URL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc  取消订阅RegId的Aliases
--spec unsubscribe_alias(pid(), ios|android, registration_id(), string(), [alias()], return|no_return) -> ok|result().
-unsubscribe_alias(ConnID, MsgType, RegisterID, Topic, Aliases, ReturnType) ->
-  Querys = #{registration_id => RegisterID, topic => Topic, aliases => Aliases},
-  Req = {"POST", MsgType, hwpush_connection:build_request(?UNSUB_ALIAS_URL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, ReturnType),
-  simplify_to_result(Result).
-
-%% @doc  获取一个应用的某个用户目前设置的所有Alias
--spec get_all_alias(pid(), ios|android, registration_id(), string()) -> result().
-get_all_alias(ConnID, MsgType, RegID, APPName) ->
-  Querys = #{registration_id => RegID, regestricted_package_name => APPName},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?ALIAS_ALL, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
-%% ===================================================================
-%%JOB 操作
-%% ===================================================================
-
-%% @doc 检测定时任务是否存在
--spec check_schedule_job_exist(pid(), ios|android, string()) -> result().
-check_schedule_job_exist(ConnID, MsgType, JobID) ->
-  Querys = #{job_id => JobID},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?JOB_EXIST, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
-  simplify_to_result(Result).
-
-
-%% @doc 删除定时任务
--spec del_schedule_job(pid(), ios|android, string()) -> result().
-del_schedule_job(ConnID, MsgType, JobID) ->
-  Querys = #{job_id => JobID},
-  Req = {"GET", MsgType, hwpush_connection:build_request(?JOB_DELETE, Querys)},
-  Result = hwpush_connection:send_message(ConnID, Req, return),
   simplify_to_result(Result).
 
 %% @doc 自1970年来的UTC毫秒数(国际时间:不是local_time:local_time中国区比universal_time快8小时)
@@ -412,13 +175,11 @@ milliseconds_utc_since_1970({{_Year, _Month, _Day}, {_Hour, _Min, _Sec}} = Time)
 %% ===================================================================
 
 merge_connection(Connection) ->
-  Default = #{host => "sandbox.xmpush.xiaomi.com",
+  Default = #{host => "api.vmall.com",
     name => undefined,
     port => 443,
-    android_auth_key => "please_config_android_api_key",
-    android_reg_package_name => "please_config_android_package_name",
-    ios_auth_key => "please_config_ios_api_key",
-    ios_bundle_id => "please_config_ios_bundle_id",
+    appid => "10679334",
+    app_secret => "a8aafcd266d477ba0c03cab9210f5e30",
     ssl_opts => [{nodelay, true}, {reuseaddr, true}],
     timeout =>  30000, %% ms
     expires => 300, %% s

@@ -4,6 +4,15 @@
 
 %%todo test API
 
+-define(SINGLE_ARGS, #{<<"deviceToken">> => "", message => <<"message">>, <<"priority">> => 1,
+                       <<"nsp_svc">> => <<"openpush.message.single_send">>, 
+                       <<"nsp_ts">> => erlang:system_time(seconds),
+                       <<"cacheMode">> => 0, <<"msgType">> => rand:uniform(100)}).
+
+-define(NOTIFICATION_ARGS, #{<<"push_type">> => 1,
+                             <<"nsp_ts">> => erlang:system_time(seconds),
+                             <<"nsp_svc">> => <<"openpush.openapi.notification_send">>}).
+
 -define(PUSH_TIMEOUT, 10000).
 
 %% pass_through 1为透传,0为(通知栏信息)不透传

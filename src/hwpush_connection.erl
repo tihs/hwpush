@@ -4,11 +4,15 @@
 -module(hwpush_connection).
 -author('zhongwencool@gmail.com').
 
+-include("hwpush.hrl").
+
 -behaviour(gen_server).
 
 %% API
 -export([build_request/2]).
 -export([urlencode/1]).
+
+-compile(export_all).
 
 %% API
 -export([stop/1]).
@@ -38,7 +42,7 @@ start_link(Connection) ->
 %% @hidden
 -spec init(hwpush:connection()) -> {ok, hwpush:connection() | {stop, term()}}.
 init(#{host := Host, port := Port, timeout :=  Timeout, name := Name,
-  expires := Expires, ssl_opts := SSLOpts} = Connection) ->
+  expires := Expires, ssl_opts := SSLOpts, appid := AppId, app_secret := AppSecret} = Connection) ->
   try
     {ok, Socket} = ssl:connect(Host, Port, ssl_opts(SSLOpts), Timeout),
     case Name of
@@ -46,13 +50,62 @@ init(#{host := Host, port := Port, timeout :=  Timeout, name := Name,
       _ when is_atom(Name) -> erlang:register(Name, self());
       _ -> ok
     end,
-    {ok, Connection#{socket => Socket, name => Name, expires_conn => epoch(Expires)}}
+	{AccessToken, ExpiresIn} = case get_access_token(AppId, AppSecret) of 
+		{ok, RData} ->
+			RData;
+		{error, Reaseon} ->
+		  {undefined, 0},
+		  throw(Reaseon)
+	end,
+	
+	erlang:start_timer(erlang:trunc((ExpiresIn/2 + 10) * 1000), self(), {update_access_token}),
+    {ok, Connection#{socket => Socket, name => Name, access_token => AccessToken , expires_conn => epoch(Expires)}}
   catch
     _: ErrReason -> {stop, ErrReason}
   end.
 
 %% @hidden
 ssl_opts(SSLOpts) -> [{mode, binary} | SSLOpts].
+
+
+get_access_token(AppId, AppSecret) ->
+	Payload = ["grant_type=client_credentials&client_id=", AppId, "&client_secret=", AppSecret],
+	ContentLen = integer_to_list(size(list_to_binary(Payload))),
+    Msg = ["POST /oauth2/token HTTP/1.1", "\r\n",
+	    	[["Host", ": ", "login.vmall.com", "\r\n"],
+	      	["Content-Type", ": ", "application/x-www-form-urlencoded; charset=utf-8", "\r\n"],
+			 ["content-length", ": ", ContentLen, "\r\n"]],
+    		"\r\n",
+		    Payload
+		  ],
+
+    {ok, Socket} = ssl:connect("login.vmall.com", 443, ssl_opts([{nodelay, true}, {reuseaddr, true}]), 30000),
+	ssl:setopts(Socket, [{active, false}]),
+    AccessToken = case ssl:send(Socket, Msg) of
+        ok ->
+	      case ssl:recv(Socket, 0, ?TIMEOUT) of
+	        {ok, Data} ->
+	            case binary:split(Data, [<<"\r\n">>], [global]) of
+	              [<<"HTTP/1.1 200 OK">>|Rests] ->
+				      Res = jsx:decode(lists:nth(length(Rests) - 3, Rests)),
+					  case Res of
+					    [{<<"access_token">>, AT}, {<<"expires_in">>, EI}] ->	  
+						  {ok, {AT, EI}};
+					    _ ->
+					       {error, Res}
+					  end;             
+	              Err -> {error, Data}
+	            end;
+	        {error, _Reason} = Err ->
+	          Err
+	      end;
+        {error, Reason} -> 
+			{error, Reason}
+    end,
+	ssl:close(Socket),
+	AccessToken.
+
+
 
 %% @hidden
 -spec handle_call(X, reference(), hwpush:connection()) ->
@@ -99,17 +152,31 @@ handle_cast(Msg, State = #{socket := undefined, expires := Expires, timeout := T
     _: ErrReason -> {stop, ErrReason}
   end;
 handle_cast(stop, State) -> {stop, normal, State};
-handle_cast({Method, MsgType, Query}, State = #{socket := Socket, host := Host,
-  android_auth_key := AndroidAuth, ios_auth_key := IOSAuth,
-  android_reg_package_name := AndroidPackageName, ios_bundle_id := IOSBundleId,
-  expires := Expires, expires_conn := ExpiresConn})  ->
+handle_cast({Token, PushMsg}, State = #{socket := Socket, host := Host,
+  expires := Expires, expires_conn := ExpiresConn, access_token := AccessToken})  ->
   case ExpiresConn =< epoch(0) of
     true ->
       ssl:close(Socket),
-      handle_cast(Query, State#{socket => undefined});
+      handle_cast({Token, PushMsg}, State#{socket => undefined});
     false ->
-      {Auth, NewQuery} = get_auth_and_query(MsgType, AndroidAuth, IOSAuth, AndroidPackageName, IOSBundleId, Query),
-      Msg = joint_req(Method, NewQuery, Auth, Host),
+	  Payload = case maps:get(pass_through, PushMsg, undefined) of
+	        1 ->
+				build_request("", maps:merge(?SINGLE_ARGS#{<<"access_token">> => AccessToken, <<"deviceToken">> => Token}, maps:remove(pass_through, PushMsg)));
+	        0 ->
+	            #{title := Title, description := Content} = PushMsg,
+	            AndroidMsg = jiffy:encode(#{<<"notification_title">> => Title, <<"notification_content">> => Content, <<"doings">> => 1}),
+	            build_request("", maps:merge(?NOTIFICATION_ARGS#{<<"access_token">> => AccessToken, tokens => Token, <<"android">> => AndroidMsg}, maps:without([pass_through, title, description], PushMsg)))
+	  end,
+
+	  ContentLen = integer_to_list(size(list_to_binary(Payload))),
+      Msg = ["POST /rest.php HTTP/1.1", "\r\n",
+	    	[["Host", ": ", "api.vmall.com", "\r\n"],
+	      	["Content-Type", ": ", "application/x-www-form-urlencoded; charset=utf-8", "\r\n"],
+			 ["content-length", ": ", ContentLen, "\r\n"]],
+    		"\r\n",
+		    Payload
+		  ],
+	  io:format("\r\n send: ~s \r\n", [Msg]),
       case ssl:send(Socket, Msg) of
         ok ->
           {noreply, State#{expires_conn => epoch(Expires)}};
@@ -121,17 +188,28 @@ handle_cast({Method, MsgType, Query}, State = #{socket := Socket, host := Host,
 -spec handle_info({ssl, tuple(), binary()} | {ssl_closed, tuple()} | X, hwpush:connection()) ->
   {noreply, hwpush:connection()} | {stop, ssl_closed | {unknown_request, X}, hwpush:connection()}.
 handle_info({ssl, SslSocket, Data}, #{socket := SslSocket, err_callback := ErrCallback} = State) ->
-  case binary:split(Data, [<<"\r\n">>], [trim]) of
-    [<<"HTTP/1.1 200 OK">>, RestBin] ->
-      case check_result(RestBin, ErrCallback) of
-        ok -> {noreply, State};
-        stop -> {stop, {reply_error, Data}, State}
-      end;
-    _ -> {stop, {reply_error, Data}, State}
-  end;
+  io:format("\r\n recv: ~s \r\n", [Data]),
+  {noreply, State};
 
 handle_info({ssl_closed, SslSocket}, State = #{socket := SslSocket}) ->
   {noreply, State#{socket => undefined}};
+
+handle_info({timeout, _TRef, {update_access_token}}, State = #{appid := AppId, app_secret := AppSecret}) ->
+  try
+	{AccessToken, ExpiresIn} = case get_access_token(AppId, AppSecret) of 
+		{ok, RData} ->
+			RData;
+		{error, Reaseon} ->
+		  {undefined, 0},
+		  throw(Reaseon)
+	end,
+	
+	erlang:start_timer(erlang:trunc((ExpiresIn/2 + 10) * 1000), self(), {update_access_token}),
+    {noreply, State#{access_token => AccessToken}}
+  catch
+    _: ErrReason -> 
+		{noreply, State}
+  end;
 
 handle_info(Request, State) -> {stop, {unknown_request, Request}, State}.
 

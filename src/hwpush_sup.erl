@@ -3,7 +3,6 @@
 %%% @end
 %%%-------------------------------------------------------------------
 -module(hwpush_sup).
--author('zhongwencool@gmail.com').
 
 -behaviour(supervisor).
 
