@@ -157,7 +157,7 @@ handle_cast(PushMsg, State = #{socket := Socket, host := Host,
       handle_cast(PushMsg, State#{socket => undefined});
     false ->
 		Payload = get_payload(PushMsg, AccessToken),
-	   io:format("\r\n send: ~s \r\n", [Payload]),
+	   %%io:format("\r\n send: ~s \r\n", [Payload]),
       case ssl:send(Socket, Payload) of
         ok ->
           {noreply, State#{expires_conn => epoch(Expires)}};
@@ -169,7 +169,7 @@ handle_cast(PushMsg, State = #{socket := Socket, host := Host,
 -spec handle_info({ssl, tuple(), binary()} | {ssl_closed, tuple()} | X, hwpush:connection()) ->
   {noreply, hwpush:connection()} | {stop, ssl_closed | {unknown_request, X}, hwpush:connection()}.
 handle_info({ssl, SslSocket, Data}, #{socket := SslSocket, err_callback := ErrCallback} = State) ->
-  io:format("\r\n recv: ~s \r\n", [Data]),
+  %%io:format("\r\n recv: ~s \r\n", [Data]),
   {noreply, State};
 
 handle_info({ssl_closed, SslSocket}, State = #{socket := SslSocket}) ->
@@ -224,7 +224,7 @@ build_request(Path, QueryParameters = #{}) ->
   build_request(Path, transform_map_to_list(QueryParameters));
 build_request(Path, QueryParameters) ->
   QueryString = urlencode(QueryParameters),
-  Path ++ "?" ++ QueryString.
+  Path ++ "" ++ QueryString.
 
 %% ===================================================================
 %% INTERNAL FUNCTION
