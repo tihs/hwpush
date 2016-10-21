@@ -169,6 +169,12 @@ handle_cast(PushMsg, State = #{socket := Socket, host := Host,
 -spec handle_info({ssl, tuple(), binary()} | {ssl_closed, tuple()} | X, hwpush:connection()) ->
   {noreply, hwpush:connection()} | {stop, ssl_closed | {unknown_request, X}, hwpush:connection()}.
 handle_info({ssl, SslSocket, Data}, #{socket := SslSocket, err_callback := ErrCallback} = State) ->
+	Code = string:str(binary_to_list(Data), "\"resultcode\":0"),
+	if Code == 0 ->
+	  ErrCallback(Data);
+	true->
+	  ok
+	end,
   %%io:format("\r\n recv: ~s \r\n", [Data]),
   {noreply, State};
 
